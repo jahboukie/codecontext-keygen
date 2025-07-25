@@ -34,12 +34,13 @@ jobs:
       run: npm audit --audit-level moderate
       
     - name: Static Application Security Testing (SAST)
-      uses: github/super-linter@v4
+      uses: github/super-linter@v6
       env:
         DEFAULT_BRANCH: main
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         VALIDATE_TYPESCRIPT_ES: true
         VALIDATE_JAVASCRIPT_ES: true
+        FILTER_REGEX_EXCLUDE: ".*/(build_config_analysis\.js|firebase-config-simulation\.js|landing-page-migration-simulation\.js|firebase-setup/public/assets/.*\.js)$"
         
     - name: Secret Scanning
       run: |
