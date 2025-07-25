@@ -465,8 +465,8 @@ export class LicenseService {
      */
     private async storeLicenseSecurely(license: License, apiKey: string): Promise<void> {
         try {
-            const fs = require('fs').promises;
-            const path = require('path');
+            const fs = await import('fs/promises');
+            const path = await import('path');
 
             // Ensure .codecontext directory exists
             const licenseDir = path.dirname(this.licenseFile);
@@ -488,11 +488,12 @@ export class LicenseService {
             const encryptionKey = this.generateLicenseEncryptionKey(apiKey);
             const iv = crypto.randomBytes(16);
             
-            // Encrypt using AES-256-CTR (compatible cipher for Node.js)
-            const cipher = crypto.createCipheriv('aes-256-ctr', encryptionKey, iv);
+            // Encrypt using AES-256-GCM for authenticated encryption
+            const cipher = crypto.createCipheriv('aes-256-gcm', encryptionKey, iv);
             
             let encrypted = cipher.update(JSON.stringify(licenseData), 'utf8', 'base64');
             encrypted += cipher.final('base64');
+            const authTag = cipher.getAuthTag();
 
             // Calculate integrity hash for tamper detection
             const integrityHash = crypto.createHash('sha256')
@@ -502,8 +503,9 @@ export class LicenseService {
             const encryptedLicense = {
                 encrypted,
                 iv: iv.toString('base64'),
+                authTag: authTag.toString('base64'),
                 integrityHash,
-                algorithm: 'aes256',
+                algorithm: 'aes-256-gcm',
                 keyDerivation: 'pbkdf2-sha256-200000'
             };
 
@@ -523,7 +525,7 @@ export class LicenseService {
      */
     private async storeApiKeySecurely(apiKey: string): Promise<void> {
         try {
-            const fs = require('fs').promises;
+            const fs = await import('fs/promises');
             
             // Use a simpler, machine-bound key derivation for apiKey storage
             const machineKey = crypto.createHash('sha256').update(
@@ -531,15 +533,17 @@ export class LicenseService {
             ).digest();
             
             const iv = crypto.randomBytes(16);
-            const cipher = crypto.createCipheriv('aes-256-ctr', machineKey, iv);
+            const cipher = crypto.createCipheriv('aes-256-gcm', machineKey, iv);
             
             let encrypted = cipher.update(apiKey, 'utf8', 'base64');
             encrypted += cipher.final('base64');
+            const authTag = cipher.getAuthTag();
             
             const encryptedApiKey = {
                 encrypted,
                 iv: iv.toString('base64'),
-                algorithm: 'aes256-ctr',
+                authTag: authTag.toString('base64'),
+                algorithm: 'aes-256-gcm',
                 keyDerivation: 'sha256-machine-bound'
             };
             
@@ -557,7 +561,7 @@ export class LicenseService {
      */
     private async loadApiKeySecurely(): Promise<string> {
         try {
-            const fs = require('fs').promises;
+            const fs = await import('fs/promises');
             
             // Check if API key file exists
             try {
@@ -574,7 +578,9 @@ export class LicenseService {
             ).digest();
             
             const iv = Buffer.from(encryptedData.iv, 'base64');
-            const decipher = crypto.createDecipheriv('aes-256-ctr', machineKey, iv);
+            const authTag = Buffer.from(encryptedData.authTag, 'base64');
+            const decipher = crypto.createDecipheriv('aes-256-gcm', machineKey, iv);
+            decipher.setAuthTag(authTag);
             
             let decrypted = decipher.update(encryptedData.encrypted, 'base64', 'utf8');
             decrypted += decipher.final('utf8');
@@ -596,9 +602,11 @@ export class LicenseService {
             // Generate the same machine-specific encryption key
             const encryptionKey = this.generateLicenseEncryptionKey(apiKey);
 
-            // Decrypt using AES-256-CTR (compatible cipher for Node.js)
+            // Decrypt using AES-256-GCM with auth tag
             const iv = Buffer.from(encryptedLicenseData.iv, 'base64');
-            const decipher = crypto.createDecipheriv('aes-256-ctr', encryptionKey, iv);
+            const authTag = Buffer.from(encryptedLicenseData.authTag, 'base64');
+            const decipher = crypto.createDecipheriv('aes-256-gcm', encryptionKey, iv);
+            decipher.setAuthTag(authTag);
 
             let decrypted = decipher.update(encryptedLicenseData.encrypted, 'base64', 'utf8');
             decrypted += decipher.final('utf8');
@@ -659,7 +667,9 @@ export class LicenseService {
 
             // Decrypt the API key
             const iv = Buffer.from(encryptedApiKeyData.iv, 'base64');
-            const decipher = crypto.createDecipheriv('aes-256-ctr', machineKey, iv);
+            const authTag = Buffer.from(encryptedApiKeyData.authTag, 'base64');
+            const decipher = crypto.createDecipheriv('aes-256-gcm', machineKey, iv);
+            decipher.setAuthTag(authTag);
 
             let decrypted = decipher.update(encryptedApiKeyData.encrypted, 'base64', 'utf8');
             decrypted += decipher.final('utf8');
@@ -681,9 +691,11 @@ export class LicenseService {
             // Generate the same machine-specific encryption key
             const encryptionKey = this.generateLicenseEncryptionKey(apiKey);
             
-            // Decrypt using AES-256-CTR (compatible cipher for Node.js)
+            // Decrypt using AES-256-GCM with auth tag
             const iv = Buffer.from(encryptedLicenseData.iv, 'base64');
-            const decipher = crypto.createDecipheriv('aes-256-ctr', encryptionKey, iv);
+            const authTag = Buffer.from(encryptedLicenseData.authTag, 'base64');
+            const decipher = crypto.createDecipheriv('aes-256-gcm', encryptionKey, iv);
+            decipher.setAuthTag(authTag);
             
             let decrypted = decipher.update(encryptedLicenseData.encrypted, 'base64', 'utf8');
             decrypted += decipher.final('utf8');
@@ -778,7 +790,7 @@ export class LicenseService {
      */
     private async loadCurrentLicense(): Promise<void> {
         try {
-            const fs = require('fs').promises;
+            const fs = await import('fs/promises');
             
             // Check if license file exists
             try {

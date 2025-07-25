@@ -28,10 +28,88 @@ setGlobalOptions({
 const STRIPE_SECRET_KEY = defineSecret('STRIPE_SECRET_KEY');
 const STRIPE_WEBHOOK_SECRET = defineSecret('STRIPE_WEBHOOK_SECRET');
 const MEMORY_PRICE_ID = defineSecret('MEMORY_PRICE_ID');
-const ENCRYPTION_MASTER_KEY = defineSecret('ENCRYPTION_MASTER_KEY');
+const KEYGEN_API_KEY = defineSecret('KEYGEN_API_KEY');
+const KEYGEN_ACCOUNT_ID = defineSecret('KEYGEN_ACCOUNT_ID');
+const KEYGEN_PRODUCT_ID = defineSecret('KEYGEN_PRODUCT_ID');
 const FIREBASE_WEB_API_KEY = defineSecret('FIREBASE_WEB_API_KEY');
 
 // Note: Stripe instances are created within functions to access secrets properly
+
+/**
+ * Create license in Keygen.sh
+ */
+async function createKeygenLicense(email: string, tier: string): Promise<{
+    success: boolean;
+    licenseKey?: string;
+    error?: string;
+}> {
+    try {
+        const keygenApiKey = process.env.KEYGEN_API_KEY || KEYGEN_API_KEY.value();
+        const keygenAccountId = process.env.KEYGEN_ACCOUNT_ID || KEYGEN_ACCOUNT_ID.value() || 'c86687d0-695b-474c-bd18-e37d96969dcb';
+        const keygenProductId = process.env.KEYGEN_PRODUCT_ID || KEYGEN_PRODUCT_ID.value();
+
+        if (!keygenApiKey || !keygenAccountId || !keygenProductId) {
+            throw new Error('Keygen.sh credentials not configured');
+        }
+
+        const response = await fetch(`https://api.keygen.sh/v1/accounts/${keygenAccountId}/licenses`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${keygenApiKey}`,
+                'Content-Type': 'application/vnd.api+json',
+                'Accept': 'application/vnd.api+json'
+            },
+            body: JSON.stringify({
+                data: {
+                    type: 'licenses',
+                    attributes: {
+                        name: `${tier} License for ${email}`,
+                        metadata: {
+                            email,
+                            tier,
+                            source: 'stripe_webhook',
+                            created_via: 'codecontextpro_payment'
+                        }
+                    },
+                    relationships: {
+                        product: {
+                            data: {
+                                type: 'products',
+                                id: keygenProductId
+                            }
+                        }
+                    }
+                }
+            })
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('❌ Keygen license creation failed:', response.status, errorText);
+            throw new Error(`Keygen API error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        const licenseKey = data.data?.attributes?.key;
+
+        if (!licenseKey) {
+            throw new Error('No license key returned from Keygen');
+        }
+
+        console.log('✅ Keygen license created:', licenseKey.substring(0, 12) + '***');
+        return {
+            success: true,
+            licenseKey
+        };
+
+    } catch (error) {
+        console.error('❌ Failed to create Keygen license:', error);
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error'
+        };
+    }
+}
 
 /**
  * CORS Handler with Security Restrictions
@@ -84,9 +162,9 @@ function validateEmail(email: string): boolean {
 function validateNoSecrets(data: any): void {
     const content = JSON.stringify(data);
     const secretPatterns = [
-        new RegExp(['s', 'k', '_'].join('') + '[a-zA-Z0-9_]{20,}'),
+        /sk_[a-zA-Z0-9_]{20,}/,
         /AIza[0-9A-Za-z\-_]{35}/,
-        new RegExp(['p', 'k', '_', 'live', '_'].join('') + '[a-zA-Z0-9]{24,}'),
+        /pk_live_[a-zA-Z0-9]{24,}/,
         /password\s*[:=]\s*[^\s]+/i,
         /secret\s*[:=]\s*[^\s]+/i,
         /api[_\s]*key\s*[:=]\s*[^\s]+/i
@@ -284,10 +362,10 @@ export const createCheckout = onRequest(
 );
 
 /**
- * Stripe Webhook Handler (v2)
+ * Stripe Webhook Handler (v2) - Updated for Keygen.sh
  */
 export const stripeWebhook = onRequest(
-    { secrets: [STRIPE_WEBHOOK_SECRET, ENCRYPTION_MASTER_KEY, STRIPE_SECRET_KEY] },
+    { secrets: [STRIPE_WEBHOOK_SECRET, KEYGEN_API_KEY, KEYGEN_ACCOUNT_ID, KEYGEN_PRODUCT_ID, STRIPE_SECRET_KEY] },
     async (req: Request, res: Response) => {
         try {
             addSecurityHeaders(res);
@@ -333,77 +411,32 @@ export const stripeWebhook = onRequest(
                     return;
                 }
 
-                const licenseId = `license_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+                // Create license in Keygen.sh instead of custom system
+                const keygenResult = await createKeygenLicense(email, tier);
                 
-                const masterKey = process.env.ENCRYPTION_MASTER_KEY || ENCRYPTION_MASTER_KEY.value();
-                
-                if (!masterKey) {
-                    console.error('❌ Missing ENCRYPTION_MASTER_KEY for license creation');
-                    res.status(500).json({ error: 'Encryption configuration error' });
+                if (!keygenResult.success || !keygenResult.licenseKey) {
+                    console.error('❌ Failed to create Keygen license:', keygenResult.error);
+                    res.status(500).json({ error: 'License creation failed' });
                     return;
                 }
 
-                const keyInput = `${licenseId}:${email}:${masterKey}`;
-                const apiKey = crypto.createHash('sha256').update(keyInput).digest('hex');
-                
-                const licenseData = {
-                    id: licenseId,
+                // Store payment record in Firestore for tracking
+                const paymentRecord = {
                     email,
                     tier,
-                    status: 'active',
                     stripeSessionId: session.id,
                     stripeCustomerId: session.customer,
-                    apiKey,
+                    keygenLicenseKey: keygenResult.licenseKey.substring(0, 12) + '***', // Masked for security
+                    amount: session.amount_total,
+                    currency: session.currency,
                     createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                    activatedAt: admin.firestore.FieldValue.serverTimestamp(),
-                    features: tier === 'memory' ? [
-                        'unlimited_memory_recalls',
-                        'unlimited_projects',
-                        'persistent_memory',
-                        'cloud_sync',
-                        'api_platform_support'
-                    ] : [
-                        'basic_memory',
-                        'limited_projects',
-                        'standard_support'
-                    ]
+                    status: 'completed'
                 };
 
                 await admin.firestore()
-                    .collection('licenses')
-                    .doc(licenseId)
-                    .set(licenseData);
-
-                // Create Firebase Auth user (if new) as per Phase 2.1 spec
-                try {
-                    const userRecord = await admin.auth().createUser({
-                        uid: `license-user-${licenseId.replace('license_', '')}`,
-                        email: email,
-                        emailVerified: true,
-                        displayName: `CodeContext Pro User`
-                    });
-
-                    // Set custom claims separately
-                    await admin.auth().setCustomUserClaims(userRecord.uid, {
-                        licenseId: licenseId,
-                        tier: tier,
-                        licenseStatus: 'active'
-                    });
-                    console.log('✅ Firebase Auth user created for license:', licenseId);
-                } catch (authError: any) {
-                    if (authError.code === 'auth/email-already-exists') {
-                        console.log('ℹ️ Firebase Auth user already exists for email:', email.substring(0, 3) + '***');
-                        // Update existing user's custom claims
-                        const existingUser = await admin.auth().getUserByEmail(email);
-                        await admin.auth().setCustomUserClaims(existingUser.uid, {
-                            licenseId: licenseId,
-                            tier: tier,
-                            licenseStatus: 'active'
-                        });
-                    } else {
-                        console.error('❌ Failed to create Firebase Auth user:', authError);
-                    }
-                }
+                    .collection('payments')
+                    .doc(session.id)
+                    .set(paymentRecord);
 
                 // Update stats - earlyAdoptersSold as per Phase 2.1 spec
                 if (tier === 'memory') {
@@ -414,11 +447,12 @@ export const stripeWebhook = onRequest(
                             earlyAdoptersSold: admin.firestore.FieldValue.increment(1),
                             memoryTierUsers: admin.firestore.FieldValue.increment(1),
                             totalRevenue: admin.firestore.FieldValue.increment(19),
-                            lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+                            lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+                            keygenLicensesCreated: admin.firestore.FieldValue.increment(1)
                         }, { merge: true });
                 }
 
-                console.log('✅ License created with encryption key:', licenseId);
+                console.log('✅ Keygen license created and payment recorded:', keygenResult.licenseKey.substring(0, 12) + '***');
             }
 
             res.status(200).json({ received: true });
@@ -430,248 +464,9 @@ export const stripeWebhook = onRequest(
     }
 );
 
-/**
- * Validate License Function (v2)
- */
-export const validateLicense = onCall(
-    { secrets: [ENCRYPTION_MASTER_KEY] },
-    async (data, context) => {
-        try {
-            if (!data || typeof data !== 'object') {
-                throw new HttpsError(
-                    'invalid-argument',
-                    'Invalid request data'
-                );
-            }
+// Legacy validateLicense function removed - replaced by Keygen.sh client-side validation
 
-            validateNoSecrets(data);
-
-            const { licenseKey } = (data as unknown) as { licenseKey: string };
-
-            if (!licenseKey || typeof licenseKey !== 'string') {
-                throw new HttpsError(
-                    'invalid-argument',
-                    'License key is required and must be a string'
-                );
-            }
-
-            const licenseKeyRegex = /^license_\d+_[a-z0-9]{9}$/;
-            if (!licenseKeyRegex.test(licenseKey)) {
-                throw new HttpsError(
-                    'invalid-argument',
-                    'Invalid license key format'
-                );
-            }
-
-            const licenseDoc = await admin.firestore()
-                .collection('licenses')
-                .doc(licenseKey)
-                .get();
-
-            if (!licenseDoc.exists) {
-                console.log('❌ License not found:', licenseKey.substring(0, 12) + '***');
-                throw new HttpsError(
-                    'not-found',
-                    'License key not found'
-                );
-            }
-
-            const licenseData = licenseDoc.data();
-            if (!licenseData) {
-                throw new HttpsError(
-                    'internal',
-                    'License data corrupted'
-                );
-            }
-
-            if (licenseData.status !== 'active') {
-                console.log('❌ License inactive:', licenseKey.substring(0, 12) + '***', 'Status:', licenseData.status);
-                throw new HttpsError(
-                    'failed-precondition',
-                    `License is ${licenseData.status}. Please contact support.`
-                );
-            }
-
-            let apiKey = licenseData.apiKey;
-            if (!apiKey) {
-                const masterKey = process.env.ENCRYPTION_MASTER_KEY || ENCRYPTION_MASTER_KEY.value();
-                
-                if (!masterKey) {
-                    console.error('❌ Missing ENCRYPTION_MASTER_KEY');
-                    throw new HttpsError(
-                        'internal',
-                        'Encryption configuration error'
-                    );
-                }
-
-                const keyInput = `${licenseData.id}:${licenseData.email}:${masterKey}`;
-                apiKey = crypto.createHash('sha256').update(keyInput).digest('hex');
-                
-                await admin.firestore()
-                    .collection('licenses')
-                    .doc(licenseKey)
-                    .update({
-                        apiKey,
-                        apiKeyGeneratedAt: admin.firestore.FieldValue.serverTimestamp()
-                    });
-
-                console.log('✅ Generated apiKey for license:', licenseKey.substring(0, 12) + '***');
-            }
-
-            console.log('✅ License validated successfully', {
-                licenseId: licenseKey.substring(0, 12) + '***',
-                email: licenseData.email.substring(0, 3) + '***',
-                tier: licenseData.tier,
-                timestamp: new Date().toISOString()
-            });
-
-            return {
-                licenseId: licenseData.id,
-                email: licenseData.email,
-                tier: licenseData.tier,
-                status: licenseData.status,
-                features: licenseData.features,
-                apiKey,
-                activatedAt: licenseData.activatedAt,
-                createdAt: licenseData.createdAt
-            };
-
-        } catch (error) {
-            console.error('❌ Error in validateLicense:', error);
-            
-            if (error instanceof HttpsError) {
-                throw error;
-            }
-            
-            throw new HttpsError(
-                'internal',
-                'License validation failed'
-            );
-        }
-    }
-);
-
-/**
- * Get Authentication Token (v2)
- */
-export const getAuthToken = onCall(
-    async (data, context) => {
-        try {
-            if (!data || typeof data !== 'object') {
-                throw new HttpsError(
-                    'invalid-argument',
-                    'Invalid request data'
-                );
-            }
-
-            validateNoSecrets(data);
-
-            const { licenseKey } = (data as unknown) as { licenseKey: string };
-
-            if (!licenseKey || typeof licenseKey !== 'string') {
-                throw new HttpsError(
-                    'invalid-argument',
-                    'License key is required and must be a string'
-                );
-            }
-
-            const licenseKeyRegex = /^license_\d+_[a-z0-9]{9}$/;
-            if (!licenseKeyRegex.test(licenseKey)) {
-                throw new HttpsError(
-                    'invalid-argument',
-                    'Invalid license key format'
-                );
-            }
-
-            const licenseDoc = await admin.firestore()
-                .collection('licenses')
-                .doc(licenseKey)
-                .get();
-
-            if (!licenseDoc.exists) {
-                console.log('❌ License not found for auth token:', licenseKey.substring(0, 12) + '***');
-                throw new HttpsError(
-                    'not-found',
-                    'License key not found'
-                );
-            }
-
-            const licenseData = licenseDoc.data();
-            if (!licenseData) {
-                throw new HttpsError(
-                    'internal',
-                    'License data corrupted'
-                );
-            }
-
-            if (licenseData.status !== 'active') {
-                console.log('❌ License inactive for auth token:', licenseKey.substring(0, 12) + '***', 'Status:', licenseData.status);
-                throw new HttpsError(
-                    'failed-precondition',
-                    `License is ${licenseData.status}. Cannot generate auth token.`
-                );
-            }
-
-            const uid = `license_${licenseData.id.replace('license_', '')}`;
-
-            const customClaims: Record<string, any> = {
-                licenseId: licenseData.id,
-                tier: licenseData.tier,
-                email: licenseData.email,
-                features: licenseData.features,
-                licenseStatus: licenseData.status
-            };
-
-            if (licenseData.tier === 'memory') {
-                customClaims.memoryLimit = 'unlimited';
-                customClaims.unlimitedProjects = true;
-                customClaims.cloudSync = true;
-                customClaims.apiPlatformSupport = true;
-            } else {
-                throw new HttpsError(
-                    'failed-precondition',
-                    'Invalid license tier. Only "memory" tier is currently supported.'
-                );
-            }
-
-            const customToken = await admin.auth().createCustomToken(uid, customClaims);
-
-            console.log('✅ Auth token generated successfully', {
-                licenseId: licenseKey.substring(0, 12) + '***',
-                email: licenseData.email.substring(0, 3) + '***',
-                tier: licenseData.tier,
-                uid: uid,
-                timestamp: new Date().toISOString()
-            });
-
-            await admin.firestore()
-                .collection('licenses')
-                .doc(licenseKey)
-                .update({
-                    lastTokenGeneratedAt: admin.firestore.FieldValue.serverTimestamp()
-                });
-
-            return {
-                customToken,
-                uid,
-                tier: licenseData.tier,
-                features: licenseData.features
-            };
-
-        } catch (error) {
-            console.error('❌ Error in getAuthToken:', error);
-            
-            if (error instanceof HttpsError) {
-                throw error;
-            }
-            
-            throw new HttpsError(
-                'internal',
-                'Auth token generation failed'
-            );
-        }
-    }
-);
+// Legacy getAuthToken function removed - Keygen.sh handles authentication directly
 
 /**
  * Report Usage Function (v2)
@@ -747,247 +542,10 @@ export const reportUsage = onCall(async (data, context) => {
     }
 });
 
-/**
- * Validate Usage Function (v2) - Phase 2.2 Implementation
- * CRITICAL: Enforces usage limits with JWT verification
- */
-export const validateUsage = onCall(
-    async (request) => {
-        try {
-            // Verify Firebase ID Token (Authentication required)
-            if (!request.auth || !request.auth.token) {
-                console.log('❌ validateUsage: No auth token provided');
-                throw new HttpsError(
-                    'unauthenticated',
-                    'Authentication required'
-                );
-            }
-
-            if (!request.data || typeof request.data !== 'object') {
-                throw new HttpsError(
-                    'invalid-argument',
-                    'Invalid request data'
-                );
-            }
-
-            validateNoSecrets(request.data);
-
-            const { licenseKey, operation, email } = (request.data as unknown) as {
-                licenseKey: string;
-                operation: string;
-                email: string;
-            };
-
-            // Validate required fields
-            if (!licenseKey || typeof licenseKey !== 'string') {
-                throw new HttpsError(
-                    'invalid-argument',
-                    'License key is required'
-                );
-            }
-
-            if (!operation || typeof operation !== 'string') {
-                throw new HttpsError(
-                    'invalid-argument',
-                    'Operation is required'
-                );
-            }
-
-            if (!email || typeof email !== 'string') {
-                throw new HttpsError(
-                    'invalid-argument',
-                    'Email is required'
-                );
-            }
-
-            // CRITICAL: Ensure authenticated user matches email in request
-            const authEmail = request.auth.token.email;
-            if (authEmail !== email) {
-                console.log('❌ validateUsage: Email mismatch', {
-                    authEmail: authEmail?.substring(0, 3) + '***',
-                    requestEmail: email.substring(0, 3) + '***'
-                });
-                throw new HttpsError(
-                    'permission-denied',
-                    'Email does not match authenticated user'
-                );
-            }
-
-            // Validate operation type
-            const validOperations = ['recall', 'remember', 'scan', 'export', 'execute'];
-            if (!validOperations.includes(operation)) {
-                throw new HttpsError(
-                    'invalid-argument',
-                    `Invalid operation. Must be one of: ${validOperations.join(', ')}`
-                );
-            }
-
-            // Get license document
-            const licenseDoc = await admin.firestore()
-                .collection('licenses')
-                .doc(licenseKey)
-                .get();
-
-            if (!licenseDoc.exists) {
-                console.log('❌ validateUsage: License not found:', licenseKey.substring(0, 12) + '***');
-                throw new HttpsError(
-                    'not-found',
-                    'License not found'
-                );
-            }
-
-            const licenseData = licenseDoc.data();
-            if (!licenseData) {
-                throw new HttpsError(
-                    'internal',
-                    'License data corrupted'
-                );
-            }
-
-            // Check license active status
-            if (licenseData.status !== 'active') {
-                console.log('❌ validateUsage: License inactive:', licenseKey.substring(0, 12) + '***');
-                throw new HttpsError(
-                    'failed-precondition',
-                    `License is ${licenseData.status}`
-                );
-            }
-
-            // Verify license owner matches authenticated user
-            if (licenseData.email !== email) {
-                console.log('❌ validateUsage: License owner mismatch', {
-                    licenseEmail: licenseData.email.substring(0, 3) + '***',
-                    requestEmail: email.substring(0, 3) + '***'
-                });
-                throw new HttpsError(
-                    'permission-denied',
-                    'License does not belong to authenticated user'
-                );
-            }
-
-            // Get current month key for usage tracking
-            const now = new Date();
-            const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-
-            // Initialize usage tracking if not exists
-            if (!licenseData.usage) {
-                await admin.firestore()
-                    .collection('licenses')
-                    .doc(licenseKey)
-                    .update({
-                        usage: {
-                            [monthKey]: {
-                                recall: 0,
-                                remember: 0,
-                                scan: 0,
-                                export: 0,
-                                execute: 0,
-                                resetAt: admin.firestore.FieldValue.serverTimestamp()
-                            }
-                        }
-                    });
-            }
-
-            // Get current usage for this month
-            const currentUsage = licenseData.usage?.[monthKey] || {
-                recall: 0,
-                remember: 0,
-                scan: 0,
-                export: 0,
-                execute: 0
-            };
-
-            // Define operation limits based on tier
-            let operationLimits: Record<string, number>;
-            if (licenseData.tier === 'memory') {
-                // Memory tier: UNLIMITED for all operations - more attractive offer!
-                operationLimits = {
-                    recall: 999999999,  // Effectively unlimited
-                    remember: 999999999,
-                    scan: 999999999,
-                    export: 999999999,
-                    execute: 999999999 // Unlimited execution when implemented
-                };
-            } else {
-                // Free tier: 20/20/20 limits
-                operationLimits = {
-                    recall: 20,
-                    remember: 20,
-                    scan: 20,
-                    export: 20,
-                    execute: 20
-                };
-            }
-
-            // Check if operation would exceed limit
-            const currentCount = currentUsage[operation] || 0;
-            const limit = operationLimits[operation];
-
-            if (currentCount >= limit) {
-                console.log('❌ validateUsage: Limit exceeded', {
-                    licenseId: licenseKey.substring(0, 12) + '***',
-                    operation,
-                    currentCount,
-                    limit,
-                    tier: licenseData.tier
-                });
-                throw new HttpsError(
-                    'resource-exhausted',
-                    `Monthly ${operation} limit of ${limit} exceeded. Current usage: ${currentCount}/${limit}`
-                );
-            }
-
-            // CRITICAL: Atomically increment usage before returning success
-            const usageUpdatePath = `usage.${monthKey}.${operation}`;
-            await admin.firestore()
-                .collection('licenses')
-                .doc(licenseKey)
-                .update({
-                    [usageUpdatePath]: admin.firestore.FieldValue.increment(1),
-                    [`usage.${monthKey}.lastUsedAt`]: admin.firestore.FieldValue.serverTimestamp()
-                });
-
-            const newCount = currentCount + 1;
-
-            console.log('✅ validateUsage: Operation authorized', {
-                licenseId: licenseKey.substring(0, 12) + '***',
-                email: email.substring(0, 3) + '***',
-                operation,
-                newCount,
-                limit,
-                tier: licenseData.tier,
-                monthKey
-            });
-
-            return {
-                success: true,
-                operation,
-                usage: {
-                    current: newCount,
-                    limit: licenseData.tier === 'memory' ? 'unlimited' : limit,
-                    remaining: licenseData.tier === 'memory' ? 'unlimited' : (limit - newCount)
-                },
-                tier: licenseData.tier,
-                monthKey
-            };
-
-        } catch (error) {
-            console.error('❌ Error in validateUsage:', error);
-            
-            if (error instanceof HttpsError) {
-                throw error;
-            }
-            
-            throw new HttpsError(
-                'internal',
-                'Usage validation failed'
-            );
-        }
-    }
-);
+// Legacy validateUsage function removed - usage limits now handled by Keygen.sh license validation
 
 /**
- * Get License by Session Function (v2)
+ * Get License by Session Function (v2) - Updated for Keygen.sh
  * Retrieves license key for success page display
  */
 export const getLicenseBySession = onRequest(
@@ -1009,31 +567,38 @@ export const getLicenseBySession = onRequest(
                     return;
                 }
 
-                // Query licenses by Stripe session ID
-                const licensesSnapshot = await admin.firestore()
-                    .collection('licenses')
-                    .where('stripeSessionId', '==', sessionId)
-                    .limit(1)
+                // Query payments by Stripe session ID (updated for Keygen.sh)
+                const paymentSnapshot = await admin.firestore()
+                    .collection('payments')
+                    .doc(sessionId)
                     .get();
 
-                if (licensesSnapshot.empty) {
-                    res.status(404).json({ error: 'License not found for session' });
+                if (!paymentSnapshot.exists) {
+                    res.status(404).json({ error: 'Payment record not found for session' });
                     return;
                 }
 
-                const licenseDoc = licensesSnapshot.docs[0];
-                const licenseData = licenseDoc.data();
+                const paymentData = paymentSnapshot.data();
+                if (!paymentData) {
+                    res.status(404).json({ error: 'Payment data not found' });
+                    return;
+                }
 
-                // Return only the license key (not sensitive data)
+                // Note: We don't store the full license key for security
+                // The customer will receive it via email or other secure channel
                 res.status(200).json({
-                    licenseKey: licenseDoc.id,
-                    tier: licenseData.tier,
-                    email: licenseData.email.substring(0, 3) + '***' // Partially masked
+                    tier: paymentData.tier,
+                    email: paymentData.email.substring(0, 3) + '***', // Partially masked
+                    amount: paymentData.amount,
+                    currency: paymentData.currency,
+                    status: 'completed',
+                    message: 'License created successfully! Check your email for the license key.',
+                    instructions: 'Use "codecontextpro activate <LICENSE_KEY>" to activate your license.'
                 });
             });
         } catch (error) {
             console.error('❌ Error in getLicenseBySession:', error);
-            res.status(500).json({ error: 'Failed to retrieve license' });
+            res.status(500).json({ error: 'Failed to retrieve payment information' });
         }
     }
 );

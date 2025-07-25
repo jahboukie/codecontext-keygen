@@ -153,11 +153,12 @@ export class MemoryDatabase {
             const key = this.generateEncryptionKey();
             const iv = crypto.randomBytes(16);
             
-            // Encrypt using AES-256-CTR for Node.js compatibility  
-            const cipher = crypto.createCipheriv('aes-256-ctr', key, iv);
+            // Encrypt using AES-256-GCM for authenticated encryption
+            const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
             
             let encrypted = cipher.update(dbData);
             encrypted = Buffer.concat([encrypted, cipher.final()]);
+            const authTag = cipher.getAuthTag();
             
             // Calculate integrity hash
             const integrityHash = this.calculateIntegrityHash(dbData);
@@ -166,9 +167,9 @@ export class MemoryDatabase {
             const encryptedFile: EncryptedDatabaseFile = {
                 encrypted: encrypted.toString('base64'),
                 iv: iv.toString('base64'),
-                authTag: '', // Not used in CTR mode
+                authTag: authTag.toString('base64'), // GCM auth tag
                 integrityHash,
-                algorithm: 'aes-256-ctr',
+                algorithm: 'aes-256-gcm',
                 keyDerivation: 'pbkdf2-sha256-200000'
             };
             
@@ -204,9 +205,11 @@ export class MemoryDatabase {
             // Generate encryption key
             const key = this.generateEncryptionKey();
             
-            // Decrypt using AES-256-CTR for compatibility
+            // Decrypt using AES-256-GCM for authenticated decryption
             const iv = Buffer.from(encryptedData.iv, 'base64');
-            const decipher = crypto.createDecipheriv('aes-256-ctr', key, iv);
+            const authTag = Buffer.from(encryptedData.authTag, 'base64');
+            const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+            decipher.setAuthTag(authTag);
             
             let decrypted = decipher.update(Buffer.from(encryptedData.encrypted, 'base64'));
             decrypted = Buffer.concat([decrypted, decipher.final()]);

@@ -11,6 +11,12 @@
 *.p12
 .secrets/
 
+# Configuration Backups (CONTAINS PRODUCTION SECRETS)
+# These folders contain original .env files with API keys and secrets
+config-backups/
+*.backup
+.env.backup*
+
 # Firebase Secrets
 firebase-setup/.env
 firebase-setup/service-account.json

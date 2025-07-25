@@ -172,10 +172,10 @@ export class MemoryEngine {
      */
     private validateNoSecrets(content: string): void {
         const secretPatterns = [
-            new RegExp(['s', 'k', '_'].join('') + '[a-zA-Z0-9_]{20,}'),     // Stripe secret keys
+            /sk_[a-zA-Z0-9_]{20,}/,                                         // Stripe secret keys
             /AIza[0-9A-Za-z\-_]{35}/,                                       // Google API keys  
-            new RegExp(['p', 'k', '_', 'live', '_'].join('') + '[a-zA-Z0-9]{24,}'), // Stripe live keys
-            new RegExp(['r', 'k', '_', 'live', '_'].join('') + '[a-zA-Z0-9]{24,}'), // Stripe restricted keys
+            /pk_live_[a-zA-Z0-9]{24,}/,                                     // Stripe live keys
+            /rk_live_[a-zA-Z0-9]{24,}/,                                     // Stripe restricted keys
             /password\s*[:=]\s*[^\s]+/i,                                    // Password assignments
             /secret\s*[:=]\s*[^\s]+/i,                                      // Secret assignments
             /api[_\s]*key\s*[:=]\s*[^\s]+/i                                 // API key assignments

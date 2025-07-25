@@ -225,9 +225,9 @@ export class FirebaseService {
      */
     private sanitizeMetadata(metadata: UsageMetadata): UsageMetadata {
         const sensitivePatterns = [
-            new RegExp(['s', 'k', '_'].join('') + '[a-zA-Z0-9_]{20,}', 'g'),   // Stripe secret keys
+            /sk_[a-zA-Z0-9_]{20,}/g,                                            // Stripe secret keys
             /AIza[0-9A-Za-z\-_]{35}/g,                                          // Google API keys
-            new RegExp(['p', 'k', '_', 'live', '_'].join('') + '[a-zA-Z0-9]{24,}', 'g'), // Stripe live keys
+            /pk_live_[a-zA-Z0-9]{24,}/g,                                        // Stripe live keys
             /password/gi,                                                       // Password fields
             /secret/gi,                                                         // Secret fields
             /key/gi,                                                           // Key fields (be careful with this)

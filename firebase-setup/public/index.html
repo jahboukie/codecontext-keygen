@@ -471,15 +471,47 @@
 
     <!-- JavaScript -->
     <script>
-        // Firebase Configuration - injected from environment variables
-        const firebaseConfig = {
-            apiKey: "AIzaSyB4whzu2Gk8mI7IHBJqwCSha4jtoEX4TeE",
-            authDomain: "codecontextpro-mes.firebaseapp.com",
-            projectId: "codecontextpro-mes",
-            storageBucket: "codecontextpro-mes.firebasestorage.app",
-            messagingSenderId: "168225201154",
-            appId: "1:168225201154:web:e035d44d4a093ddcf7db1b"
-        };
+        // Firebase Configuration - loaded securely from backend
+        let firebaseConfig = null;
+        
+        // Load Firebase configuration securely from backend
+        async function loadFirebaseConfig() {
+            try {
+                console.log('🔧 Loading Firebase configuration from secure endpoint...');
+                const response = await fetch('/api/getFirebaseConfig');
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const config = await response.json();
+                
+                // Validate required fields
+                if (!config.apiKey || !config.projectId) {
+                    throw new Error('Invalid Firebase configuration received');
+                }
+                
+                firebaseConfig = {
+                    apiKey: config.apiKey,
+                    authDomain: config.authDomain,
+                    projectId: config.projectId,
+                    storageBucket: config.storageBucket,
+                    messagingSenderId: config.messagingSenderId,
+                    appId: config.appId,
+                    databaseURL: config.databaseURL
+                };
+                
+                console.log('✅ Firebase configuration loaded securely');
+                return firebaseConfig;
+                
+            } catch (error) {
+                console.error('❌ Failed to load Firebase configuration:', error);
+                
+                // Graceful degradation - disable features that require Firebase
+                console.warn('⚠️ Firebase-dependent features will be disabled');
+                return null;
+            }
+        }
 
         // Mobile menu toggle
         document.getElementById('mobile-menu-btn').addEventListener('click', function() {
@@ -538,6 +570,16 @@
             checkoutText.innerHTML = '<div class="inline-block animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>Processing...';
 
             try {
+                // Ensure Firebase config is loaded before making API calls
+                if (!firebaseConfig) {
+                    console.log('🔧 Loading Firebase config before checkout...');
+                    await loadFirebaseConfig();
+                }
+                
+                if (!firebaseConfig) {
+                    throw new Error('Firebase configuration not available');
+                }
+
                 // Call Firebase Function to create checkout session with email
                 const response = await fetch('https://us-central1-codecontextpro-mes.cloudfunctions.net/createCheckout', {
                     method: 'POST',
@@ -571,6 +613,11 @@
         // Load pricing data from Firebase
         async function loadPricingData() {
             try {
+                // Ensure Firebase config is loaded
+                if (!firebaseConfig) {
+                    await loadFirebaseConfig();
+                }
+                
                 const response = await fetch('https://us-central1-codecontextpro-mes.cloudfunctions.net/getPricingHttp');
                 const data = await response.json();
                 
@@ -579,12 +626,28 @@
                 }
             } catch (error) {
                 console.error('Error loading pricing data:', error);
-                // Fallback to template value
+                // Fallback to template value - graceful degradation
             }
         }
 
-        // Load pricing data on page load
-        loadPricingData();
+        // Initialize application
+        async function initializeApp() {
+            try {
+                // Load Firebase configuration first
+                await loadFirebaseConfig();
+                
+                // Then load dynamic data
+                await loadPricingData();
+                
+                console.log('✅ Application initialized successfully');
+            } catch (error) {
+                console.error('❌ Application initialization failed:', error);
+                // Application still works without dynamic features
+            }
+        }
+
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', initializeApp);
 
         // Auto-refresh pricing data every 30 seconds
         setInterval(loadPricingData, 30000);
